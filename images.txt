@@ -1,3 +1,4 @@
 xiaoyaliu/alist:hostmode
 xiaoyaliu/glue:latest
 emby/embyserver
+linuxserver/resilio-sync
