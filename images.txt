@@ -1,2 +1,2 @@
 xiaoyaliu/alist:base
-portainer:latest
+portainer/portainer
