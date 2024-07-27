@@ -1,2 +1,3 @@
 xiaoyaliu/alist:hostmode
 xiaoyaliu/glue:latest
+emby/embyserver
