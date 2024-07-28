@@ -6,3 +6,4 @@ ddsderek/xiaoya-emd:latest
 amilys/embyserver:latest
 geekotaku/xiaoyahelper
 ddsderek/xiaoyakeeper
+haroldli/xiaoya-tvbox
