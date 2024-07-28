@@ -2,4 +2,4 @@ xiaoyaliu/alist:hostmode
 xiaoyaliu/glue:latest
 emby/embyserver
 linuxserver/resilio-sync
-xiaoya-emd:latest
+ddsderek/xiaoya-emd:latest
