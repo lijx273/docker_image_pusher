@@ -3,3 +3,4 @@ xiaoyaliu/glue:latest
 emby/embyserver
 linuxserver/resilio-sync
 ddsderek/xiaoya-emd:latest
+amilys/embyserver:latest
