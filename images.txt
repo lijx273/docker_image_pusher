@@ -1,4 +1,3 @@
-apolloconfig/apollo-eureka:2.1.0
 apolloconfig/apollo-portal:2.1.0
 apolloconfig/apollo-configservice:2.1.0
 apolloconfig/apollo-adminservice:2.1.0
