@@ -1,1 +1,1 @@
-apereo/cas:v6.3.7
+apereo/cas:v6.3.10
