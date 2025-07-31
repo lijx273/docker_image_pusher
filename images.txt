@@ -1,1 +1,4 @@
 apereo/cas:6.3.5
+apollo-adminservice:2.1.0
+apollo-configservice:2.1.0
+apollo-portal:2.1.0
