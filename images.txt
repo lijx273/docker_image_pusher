@@ -3,3 +3,4 @@ apolloconfig/apollo-adminservice:2.1.0
 apolloconfig/apollo-configservice:2.1.0
 apolloconfig/apollo-portal:2.1.0
 apachecn0/hands-on-ml-2e-zh
+apachecn0/an-introduction-to-statistical-learning
