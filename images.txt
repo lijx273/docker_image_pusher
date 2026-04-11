@@ -1,2 +1,1 @@
-chromadb/chroma:0.5.2
-mysql:8.0.36
+ghcr.io/hughplay/embedding-api:v0.2.0
