@@ -1,1 +1,1 @@
-ubuntu/squid:6.1-23.10_beta
+opengauss/opengauss:6.0.3
