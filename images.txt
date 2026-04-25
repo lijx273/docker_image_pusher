@@ -1,1 +1,1 @@
-ubuntu/squid:6.13-0ubuntu0.24.04.3
+ubuntu/squid:6.1-23.10_beta
