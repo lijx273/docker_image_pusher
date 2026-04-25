@@ -1,1 +1,1 @@
-dify-plugin-daemon:0.5.2
+dify-plugin-daemon:0.5.3-local
