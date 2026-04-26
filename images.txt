@@ -1,3 +1,1 @@
-docker.elastic.co/elasticsearch/elasticsearch:8.14.3
-docker.elastic.co/kibana/kibana:8.14.3
-downloads.unstructured.io/unstructured-io/unstructured-api:1.0.0
+langgenius/dify-plugin-daemon:0.5.3-fix1-local-linux-amd64
