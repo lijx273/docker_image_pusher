@@ -1,1 +1,1 @@
-langgenius/dify-plugin-daemon:0.5.3-fix1-local-linux-amd64
+langgenius/dify-api:1.13.4
