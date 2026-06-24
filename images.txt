@@ -1,2 +1,1 @@
-langgenius/dify-api:1.14.0
-langgenius/dify-web:1.14.0
+triliumnext/trilium:0.103.0
