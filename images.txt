@@ -1,3 +1,1 @@
-quay.io/argoproj/argocd:v2.7.18
-redis:7.0.14-alpine
-
+ghcr.dockerproxy.com/open-webui/open-webui:main
