@@ -1,1 +1,1 @@
-openeuler/open-webui:0.1.108-oe2403sp1
+openeuler/open-webui:0.1.108-oe2403sp4
