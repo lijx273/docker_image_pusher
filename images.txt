@@ -1,1 +1,1 @@
-ghcr.dockerproxy.com/open-webui/open-webui:main
+openeuler/open-webui
