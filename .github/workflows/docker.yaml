@@ -80,11 +80,24 @@ jobs:
       # 把 /var/lib/containerd 重定向到 107G 的 /var/lib/docker 大分区，根分区不再参与镜像存储
       - name: Redirect containerd store to big partition
         run: |
+          # 确保 docker/containerd 完全停止（防止旧实例继续用根分区已删除的旧目录）
+          sudo service docker stop || true
+          sudo pkill -f containerd || true
+          sleep 2
+          # 挂载：把 containerd 数据目录放到 107G 大分区上
           sudo mkdir -p /var/lib/docker/containerd-store
           sudo mount --bind /var/lib/docker/containerd-store /var/lib/containerd
+          # 预建 containerd 目录骨架（否则 overlayfs 快照目录缺失，拉镜像报 no such file or directory）
+          sudo mkdir -p /var/lib/containerd/io.containerd.content.v1.content/blobs/sha256
+          sudo mkdir -p /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots
+          sudo mkdir -p /var/lib/containerd/io.containerd.metadata.v1.bolt
+          sudo mkdir -p /var/lib/containerd/io.containerd.runtime.v2.task
+          # 重启 docker
           sudo service docker start
           echo "===== 重定向后 ====="
           df -hT / /var/lib/docker /var/lib/containerd
+          echo "===== containerd 目录结构 ====="
+          sudo ls /var/lib/containerd
 
       - name: Purge leftover docker data
         run: |
