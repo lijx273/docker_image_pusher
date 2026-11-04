@@ -1,157 +1,332 @@
-name: Docker
+name: Docker Sync (skopeo)
 
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
 
-
 env:
   ALIYUN_REGISTRY: "${{ secrets.ALIYUN_REGISTRY }}"
   ALIYUN_NAME_SPACE: "${{ secrets.ALIYUN_NAME_SPACE }}"
   ALIYUN_REGISTRY_USER: "${{ secrets.ALIYUN_REGISTRY_USER }}"
   ALIYUN_REGISTRY_PASSWORD: "${{ secrets.ALIYUN_REGISTRY_PASSWORD }}"
+  IMAGES_FILE: "images.txt"
+  MODE: "pull"                # pull（快，需磁盘）| skopeo（零磁盘）
+  PLATFORM: "linux/amd64"
+  PULL_CONCURRENCY: "6"
+  PUSH_CONCURRENCY: "3"
+  BATCH_SIZE: "2"             # 大镜像多时调成 1
+  RETRIES: "3"
+  SKIP_EXISTING: "digest"
+  SHARD_TOTAL: "4"
 
 jobs:
-
-  build:
-    name: Pull
+  sync:
+    name: Sync
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+
     steps:
-    - name: Before freeing up disk space
-      run: |
-        echo "Before freeing up disk space"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
+      - name: Checkout Code
+        uses: actions/checkout@v5
 
-    # 增加可用磁盘空间
-    - name: Maximize build space
-      uses: easimon/maximize-build-space@master
-      with:
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet \
+                     /usr/local/lib/android \
+                     /opt/ghc \
+                     /usr/local/share/boost \
+                     /usr/share/swift \
+                     "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af --volumes || true
+          sudo rm -rf /var/lib/containerd/io.containerd.content.v1.content/blobs/sha256/* || true
+          df -h /
 
-        root-reserve-mb: 2048
-        swap-size-mb: 128
-        remove-dotnet: 'true'
-        remove-haskell: 'true'
-        # 如果空间还是不够用，可以把以下开启，清理出更多空间
-        # remove-android: 'true'
-        # remove-codeql: 'true'
-        build-mount-path: '/var/lib/docker/'
+      - name: Move containerd data to /mnt
+        run: |
+          set -e
+          sudo systemctl stop docker docker.socket containerd || true
+          sudo mkdir -p /mnt/docker /mnt/containerd
+          sudo rsync -a /var/lib/docker/     /mnt/docker/ || true
+          sudo rsync -a /var/lib/containerd/ /mnt/containerd/ || true
+          sudo mount --bind /mnt/docker     /var/lib/docker
+          sudo mount --bind /mnt/containerd /var/lib/containerd
+          sudo systemctl start containerd
+          sudo systemctl start docker
+          sleep 3
+          df -h /var/lib/containerd
 
-    - name: Restart docker
-      run: sudo service docker restart
+      - name: Configure Docker
+        run: |
+          sudo mkdir -p /etc/docker
+          sudo tee /etc/docker/daemon.json > /dev/null <<'JSONC'
+          {
+            "max-concurrent-downloads": 6,
+            "max-concurrent-uploads": 6,
+            "registry-mirrors": ["https://docker.m.daocloud.io"]
+          }
+          JSONC
+          sudo systemctl restart docker
+          docker info | grep -iE "registry mirrors|max concurrent"
 
-    - name: Free up disk space complete
-      run: |
-        echo "Free up disk space complete"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
+      - name: Install tools
+        run: |
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+          command -v zstd     >/dev/null || { sudo apt-get install -y -qq zstd; }
+          command -v jq       >/dev/null || { sudo apt-get install -y -qq jq; }
+          skopeo --version
 
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Login to Aliyun
+        if: env.ALIYUN_REGISTRY != '' && env.ALIYUN_REGISTRY_USER != ''
+        run: |
+          echo "${{ secrets.ALIYUN_REGISTRY_PASSWORD }}" \
+            | docker login "$ALIYUN_REGISTRY" \
+              --username "$ALIYUN_REGISTRY_USER" --password-stdin
 
-    - name: Docker Setup Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Pull and Push
+        env:
+          SHARD: "${{ matrix.shard }}"
+        run: |
+          cat > /tmp/sync.sh <<'EOSCRIPT'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
 
-    - name: Build and push image Aliyun
-      run: |
-        docker login -u $ALIYUN_REGISTRY_USER -p $ALIYUN_REGISTRY_PASSWORD $ALIYUN_REGISTRY
-        # 数据预处理,判断镜像是否重名
-        declare -A duplicate_images
-        declare -A temp_map
-        while IFS= read -r line || [ -n "$line" ]; do
-            # 忽略空行与注释
-            [[ -z "$line" ]] && continue
-            if echo "$line" | grep -q '^\s*#'; then
-                continue
-            fi
-            
-            # 获取镜像的完整名称，例如kasmweb/nginx:1.25.3（命名空间/镜像名:版本号）
-            image=$(echo "$line" | awk '{print $NF}')
-            # 将@sha256:等字符删除
-            image="${image%%@*}"
-            echo "image $image"
-            # 获取镜像名:版本号  例如nginx:1.25.3
-            image_name_tag=$(echo "$image" | awk -F'/' '{print $NF}')
-            echo "image_name_tag $image_name_tag"
-            # 获取命名空间 例如kasmweb,  这里有种特殊情况 docker.io/nginx，把docker.io当成命名空间，也OK
-            name_space=$(echo "$image" | awk -F'/' '{if (NF==3) print $2; else if (NF==2) print $1; else print ""}')
-            echo "name_space: $name_space"
-            # 这里不要是空值影响判断
-            name_space="${name_space}_"
-            # 获取镜像名例如nginx
-            image_name=$(echo "$image_name_tag" | awk -F':' '{print $1}')
-            echo "image_name: $image_name"
-            
-            # 如果镜像存在于数组中，则添加temp_map
-            if [[ -n "${temp_map[$image_name]}" ]]; then
-                 # 如果temp_map已经存在镜像名，判断是不是同一命名空间
-                 if [[ "${temp_map[$image_name]}" != $name_space  ]]; then
-                    echo "duplicate image name: $image_name"
-                    duplicate_images[$image_name]="true"
-                 fi
+          MODE="${MODE:-pull}"
+          PLATFORM="${PLATFORM:-linux/amd64}"
+          PULL_CONCURRENCY="${PULL_CONCURRENCY:-6}"
+          PUSH_CONCURRENCY="${PUSH_CONCURRENCY:-3}"
+          BATCH_SIZE="${BATCH_SIZE:-2}"
+          RETRIES="${RETRIES:-3}"
+          SKIP_EXISTING="${SKIP_EXISTING:-digest}"
+          IMAGES_FILE="${IMAGES_FILE:-images.txt}"
+          SHARD="${SHARD:-0}"
+          SHARD_TOTAL="${SHARD_TOTAL:-1}"
+          DEST_BASE="${ALIYUN_REGISTRY}/${ALIYUN_NAME_SPACE}"
+
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "$WORK"' EXIT
+          mkdir -p "$WORK/list" "$WORK/pulled" "$WORK/fail"
+
+          log() { printf '\033[36m[%(%H:%M:%S)T]\033[0m %s\n' -1 "$*" >&2; }
+
+          # ── 清理磁盘 ────────────────────────────────────────
+          reclaim() {
+            docker image prune -af >/dev/null 2>&1 || true
+            sudo rm -rf /var/lib/containerd/io.containerd.content.v1.content/blobs/sha256/* 2>/dev/null || true
+            df -h / | tail -1 | awk '{print "  磁盘剩余: "$4" ("$5" 已用)"}'
+          }
+
+          # ── 解析行 ──────────────────────────────────────────
+          parse_line() {
+            local raw="${1%%#*}"
+            local -a toks=()
+            # shellcheck disable=SC2206
+            toks=($raw)
+            local plat="" img="" i
+            for (( i=0; i<${#toks[@]}; i++ )); do
+              case "${toks[$i]}" in
+                --platform)     (( i++ )); plat="${toks[$i]:-}" ;;
+                --platform=*)   plat="${toks[$i]#--platform=}" ;;
+                --*)            ;;
+                *)              img="${toks[$i]}" ;;
+              esac
+            done
+            [ -n "$img" ] || return 1
+            [ -n "$plat" ] || plat="$PLATFORM"
+            printf '%s\t%s' "$plat" "$img"
+          }
+
+          # ── 候选源（国内代理优先）────────────────────────────
+          candidates() {
+            local img="$1" first path
+            if [[ "$img" == */* ]]; then
+              first="${img%%/*}"; path="${img#*/}"
+              if [[ "$first" != *.* && "$first" != *:* ]]; then
+                first="docker.io"; path="$img"
+              fi
             else
-                # 存镜像的命名空间
-                temp_map[$image_name]=$name_space
-            fi       
-        done < images.txt
-        
-        
-        while IFS= read -r line || [ -n "$line" ]; do
-            # 忽略空行与注释
-            [[ -z "$line" ]] && continue
-            if echo "$line" | grep -q '^\s*#'; then
-                continue
+              first="docker.io"; path="library/$img"
             fi
-        
-            echo "docker pull $line"
-            docker pull $line
-            platform=$(echo "$line" | awk -F'--platform[ =]' '{if (NF>1) print $2}' | awk '{print $1}')
-            echo "platform is $platform"
-            # 如果存在架构信息 将架构信息拼到镜像名称前面
-            if [ -z "$platform" ]; then
-                platform_prefix=""
-            else
-                platform_prefix="${platform//\//_}_"
-            fi
-            echo "platform_prefix is $platform_prefix"
-            # 获取镜像的完整名称，例如kasmweb/nginx:1.25.3（命名空间/镜像名:版本号）
-            image=$(echo "$line" | awk '{print $NF}')
+            case "$first" in
+              docker.io|index.docker.io|registry-1.docker.io)
+                printf '%s\n' "docker.m.daocloud.io/$path" \
+                              "docker.1panel.live/$path" \
+                              "hub.rat.dev/$path" ;;
+              k8s.gcr.io|registry.k8s.io)
+                printf '%s\n' "k8s-gcr.m.daocloud.io/$path" \
+                              "registry.k8s.io/$path" ;;
+              gcr.io)    printf '%s\n' "gcr.m.daocloud.io/$path" "gcr.io/$path" ;;
+              quay.io)   printf '%s\n' "quay.m.daocloud.io/$path" "quay.io/$path" ;;
+              ghcr.io)   printf '%s\n' "ghcr.m.daocloud.io/$path" "ghcr.io/$path" ;;
+              *)         printf '%s\n' "$img" ;;
+            esac
+          }
 
-            # 获取 镜像名:版本号  例如nginx:1.25.3
-            image_name_tag=$(echo "$image" | awk -F'/' '{print $NF}')
-            # 获取命名空间 例如kasmweb  这里有种特殊情况 docker.io/nginx，把docker.io当成命名空间，也OK
-            name_space=$(echo "$image" | awk -F'/' '{if (NF==3) print $2; else if (NF==2) print $1; else print ""}')
-            # 获取镜像名例  例如nginx
-            image_name=$(echo "$image_name_tag" | awk -F':' '{print $1}')
-        
-            name_space_prefix=""
-            # 如果镜像名重名
-            if [[ -n "${duplicate_images[$image_name]}" ]]; then
-               #如果命名空间非空，将命名空间加到前缀
-               if [[ -n "${name_space}" ]]; then
-                  name_space_prefix="${name_space}_"
-               fi
+          # ── 目标镜像名（registry 段降为子路径）────────────────
+          dest_for() {
+            local img="$1" first rest
+            if [[ "$img" == */* ]]; then
+              first="${img%%/*}"
+              if [[ "$first" == *.* || "$first" == *:* ]]; then
+                rest="${img#*/}"
+                first="${first,,}"; first="${first//:/_}"
+                printf '%s/%s' "$first" "$rest"
+                return
+              fi
             fi
-            
-            # 将@sha256:等字符删除
-            image_name_tag="${image_name_tag%%@*}"
-            new_image="$ALIYUN_REGISTRY/$ALIYUN_NAME_SPACE/$platform_prefix$name_space_prefix$image_name_tag"
-            echo "docker tag $image $new_image"
-            docker tag $image $new_image
-            echo "docker push $new_image"
-            docker push $new_image
-            echo "开始清理磁盘空间"
-            echo "=============================================================================="
-            df -hT
-            echo "=============================================================================="
-            docker rmi $image
-            docker rmi $new_image
-            echo "磁盘空间清理完毕"
-            echo "=============================================================================="
-            df -hT
-            echo "=============================================================================="     
-            
-        done < images.txt
+            printf '%s' "$img"
+          }
+
+          platform_digest() {
+            local ref="$1" plat="$2" os arch
+            os="${plat%%/*}"; arch="${plat#*/}"
+            docker manifest inspect --verbose "$ref" 2>/dev/null | jq -r --arg o "$os" --arg a "$arch" '
+              (if type=="array" then . else [.] end)
+              | map(select(.Descriptor.os==$o and .Descriptor.architecture==$a))
+              | .[0].Descriptor.digest // empty' 2>/dev/null || true
+          }
+
+          already_synced() {
+            [ "$SKIP_EXISTING" != "0" ] || return 1
+            local plat="$1" img="$2" dest="$DEST_BASE/$(dest_for "$img")" cand d1 d2
+            if [ "$SKIP_EXISTING" = "tag" ]; then
+              docker manifest inspect "$dest" >/dev/null 2>&1 && return 0 || return 1
+            fi
+            while IFS= read -r cand; do
+              [ -n "$cand" ] || continue
+              d1="$(platform_digest "$cand" "$plat")"; [ -n "$d1" ] || continue
+              d2="$(platform_digest "$dest"  "$plat")"; [ -n "$d2" ] || continue
+              [ "$d1" = "$d2" ] && return 0
+            done < <(candidates "$img")
+            return 1
+          }
+
+          # ── 模式 A：skopeo 直传（零磁盘占用）──────────────────
+          skopeo_one() {
+            local plat="$1" img="$2"
+            local dest="$DEST_BASE/$(dest_for "$img")"
+            local os="${plat%%/*}" arch="${plat#*/}"
+            local cand attempt
+            if already_synced "$plat" "$img"; then
+              log "SKIP  $img（目标已是同一 digest）"; return 0
+            fi
+            while IFS= read -r cand; do
+              [ -n "$cand" ] || continue
+              attempt=1
+              while (( attempt <= RETRIES )); do
+                if skopeo copy \
+ --dest-creds "$ALIYUN_REGISTRY_USER:$ALIYUN_REGISTRY_PASSWORD" \
+                      --override-os "$os" --override-arch "$arch" \
+                      --retry-times 3 \
+                      "docker://$cand" "docker://$dest" >/dev/null 2>&1; then
+                  log "COPY  $img  =>  $dest"
+                  return 0
+                fi
+                attempt=$(( attempt + 1 )); sleep $(( attempt * 2 ))
+              done
+              log "RETRY $img 源 $cand 失败，换下一个"
+            done < <(candidates "$img")
+            log "FAIL  $img"; printf '%s\n' "$img" >> "$WORK/fail"; return 1
+          }
+
+          # ── 模式 B：pull + push（快，需磁盘）──────────────────          pull_one() {
+            local plat="$1" img="$2"
+            local key cand attempt
+            key="$(printf '%s' "$img" | tr '/:@' '___')"
+            if already_synced "$plat" "$img"; then
+              log "SKIP  $img（目标已是同一 digest）"
+              printf '%s\n' "$img" > "$WORK/pulled/$key"; return 0
+            fi
+            while IFS= read -r cand; do
+              [ -n "$cand" ] || continue
+              attempt=1
+              while (( attempt <= RETRIES )); do
+                if docker pull --platform "$plat" "$cand" >/dev/null 2>&1; then
+                  log "PULL  $img  <=  $cand"
+                  printf '%s\n' "$cand" > "$WORK/pulled/$key"; return 0
+                fi
+                attempt=$(( attempt + 1 )); sleep $(( attempt * 2 ))
+              done
+              log "RETRY $img 源 $cand 失败，换下一个"
+            done < <(candidates "$img")
+            log "FAIL  $img（拉取失败）"; printf '%s\n' "$img" >> "$WORK/fail"; return 1
+          }
+
+          push_one() {
+            local plat="$1" img="$2"
+            local key src dest
+            key="$(printf '%s' "$img" | tr '/:@' '___')"
+            src="$WORK/pulled/$key"; [ -f "$src" ] || return 0
+            src="$(cat "$src")"
+            dest="$DEST_BASE/$(dest_for "$img")"
+            docker tag "$src" "$dest" 2>/dev/null || true
+            if docker push "$dest" >/dev/null 2>&1; then
+              log "PUSH  $dest"
+            else
+              log "FAIL  $dest（推送失败）"; printf '%s\n' "$img" >> "$WORK/fail"
+            fi
+            docker rmi -f "$src" "$dest" >/dev/null 2>&1 || true
+          }
+
+          export -f skopeo_one pull_one push_one candidates dest_for already_synced platform_digest log reclaim
+          export WORK MODE PLATFORM RETRIES SKIP_EXISTING DEST_BASE ALIYUN_REGISTRY_USER ALIYUN_REGISTRY_PASSWORD
+
+          # ── 主流程 ───────────────────────────────────────────
+          [ -f "$IMAGES_FILE" ] || { echo "找不到 $IMAGES_FILE" >&2; exit 1; }
+
+          ALL="$WORK/all.txt"; : > "$ALL"
+          while IFS= read -r raw || [ -n "$raw" ]; do
+            parsed="$(parse_line "$raw")" || continue
+            printf '%s\n' "$parsed" >> "$ALL"
+          done < "$IMAGES_FILE"
+
+          total="$(wc -l < "$ALL" | tr -d ' ')"
+          [ "$total" -gt 0 ] || { echo "$IMAGES_FILE 为空" >&2; exit 1; }
+
+          SHARD_FILE="$WORK/shard.txt"; : > "$SHARD_FILE"
+          idx=0
+          while IFS=$'\t' read -r p i; do
+            if (( idx % SHARD_TOTAL == SHARD )); then
+              printf '%s\t%s\n' "$p" "$i" >> "$SHARD_FILE"
+            fi
+            idx=$(( idx + 1 ))
+          done < "$ALL"
+
+          mine="$(wc -l < "$SHARD_FILE" | tr -d ' ')"
+          log "分片 $SHARD/$SHARD_TOTAL 负责 $mine/$total 个镜像  模式=$MODE 架构=$PLATFORM"
+          [ "$mine" -gt 0 ] || exit 0
+
+          split -l "$BATCH_SIZE" -d "$SHARD_FILE" "$WORK/batch_"
+          for batch in "$WORK"/batch_*; do
+            [ -s "$batch" ] || continue
+            log "--- 批次 $(basename "$batch") ---"
+            if [ "$MODE" = "skopeo" ]; then
+              xargs -a "$batch" -P "$PULL_CONCURRENCY" -I{} \
+                bash -c 'IFS=$'"'"'\t'"'"' read -r p i <<< "$1"; skopeo_one "$p" "$i"' _ {} || true
+            else
+              xargs -a "$batch" -P "$PULL_CONCURRENCY" -I{} \
+                bash -c 'IFS=$'"'"'\t'"'"' read -r p i <<< "$1"; pull_one "$p" "$i"' _ {} || true
+              xargs -a "$batch" -P "$PUSH_CONCURRENCY" -I{} \
+                bash -c 'IFS=$'"'"'\t'"'"' read -r p i <<< "$1"; push_one "$p" "$i"' _ {} || true
+            fi
+            reclaim
+          done
+
+          failed="$(wc -l < "$WORK/fail" | tr -d ' ')"
+          log "分片 $SHARD 完成：$(( mine - failed ))/$mine 成功，$failed 失败"
+          [ "$failed" -eq 0 ] || { cat "$WORK/fail" >&2; exit 1; }
+          EOSCRIPT
+
+          bash /tmp/sync.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          df -h /
+          echo "=== 目标仓库 ==="
+          echo "$ALIYUN_REGISTRY/$ALIYUN_NAME_SPACE"
