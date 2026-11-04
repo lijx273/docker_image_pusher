@@ -1,1 +1,1 @@
-openeuler/open-webui:0.1.108-oe2403sp4
+milvusdb/milvus:v3.0.4
