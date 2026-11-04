@@ -49,13 +49,42 @@ jobs:
       - name: Restart docker
         run: sudo service docker restart
 
-      # 如果你的 runner 的 Docker 使用 containerd 镜像存储（报错路径是 /var/lib/containerd/...），
-      # 且上面清理后 / 分区空间仍不足，可取消下面注释，把 /var/lib/containerd 挂到内存盘
-      # - name: Enlarge containerd data dir
-      #   run: |
-      #     sudo mkdir -p /var/lib/containerd
-      #     sudo mount -t tmpfs -o size=30G,noatime tmpfs /var/lib/containerd
-      #     sudo service docker restart
+      # ---- 根分区清理：runner 每次都是全新机器，预装组件/镜像全部可删 ----
+      - name: 诊断根分区占用
+        run: |
+          echo "===== 根分区大目录 Top20（-x 不跨文件系统）====="
+          sudo du -xhd1 / 2>/dev/null | sort -h | tail -20
+          echo "===== 清理前根分区 ====="
+          df -hT /
+
+      - name: 清理根分区空间
+        run: |
+          # 工具链缓存（maximize-build-space 可能没删干净，这里强制再删一遍）
+          sudo rm -rf /opt/hostedtoolcache 2>/dev/null || true
+          sudo rm -rf /usr/local/lib/android 2>/dev/null || true
+          sudo rm -rf /usr/share/dotnet 2>/dev/null || true
+          sudo rm -rf /opt/ghc /usr/local/share/ghc /usr/local/.ghcup 2>/dev/null || true
+          sudo rm -rf /usr/local/lib/node_modules 2>/dev/null || true
+          # 包缓存与临时文件
+          sudo apt-get clean 2>/dev/null || true
+          sudo rm -rf /var/lib/apt/lists 2>/dev/null || true
+          sudo rm -rf /home/runner/.cache /root/.cache 2>/dev/null || true
+          # 预装容器镜像数据（先停 docker，再删，containerd 会自动重建目录）
+          sudo service docker stop 2>/dev/null || true
+          sudo rm -rf /var/lib/containerd/io.containerd.content.v1.content \
+                      /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs 2>/dev/null || true
+          echo "===== 清理后根分区 ====="
+          df -hT /
+
+      # 关键修复：docker 用 containerd 镜像存储时，镜像数据写在根分区的 /var/lib/containerd。
+      # 把 /var/lib/containerd 重定向到 107G 的 /var/lib/docker 大分区，根分区不再参与镜像存储
+      - name: Redirect containerd store to big partition
+        run: |
+          sudo mkdir -p /var/lib/docker/containerd-store
+          sudo mount --bind /var/lib/docker/containerd-store /var/lib/containerd
+          sudo service docker start
+          echo "===== 重定向后 ====="
+          df -hT / /var/lib/docker /var/lib/containerd
 
       - name: Purge leftover docker data
         run: |
@@ -64,7 +93,7 @@ jobs:
 
       - name: Free up disk space complete
         run: |
-          echo "===== 清理后磁盘状态 ====="
+          echo "===== 最终磁盘状态 ====="
           df -hT
 
       - name: Checkout Code
